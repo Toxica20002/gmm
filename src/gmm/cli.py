@@ -35,9 +35,17 @@ def build_physical_map(physical_monitors):
         }
     return physical_map
 
-def find_best_mode(modes, width, height):
+def find_best_mode(modes, width, height, target_rate=None):
     matching = [m for m in modes if m[1] == width and m[2] == height]
     if not matching:
+        return None
+    
+    if target_rate is not None:
+        # Sort by proximity to target_rate
+        matching_sorted = sorted(matching, key=lambda m: abs(m[3] - target_rate))
+        # Check if the closest match is within 1.0Hz tolerance
+        if abs(matching_sorted[0][3] - target_rate) < 1.0:
+            return matching_sorted[0][0]
         return None
     
     # 1. Prefer current mode
@@ -53,6 +61,7 @@ def find_best_mode(modes, width, height):
     # 3. Prefer refresh rate closest to 60Hz
     matching_sorted = sorted(matching, key=lambda m: abs(m[3] - 60.0))
     return matching_sorted[0][0]
+
 
 def find_common_resolution_multi(source_conn, target_conns, physical_map):
     source_modes = physical_map[source_conn]['modes']
@@ -271,17 +280,26 @@ GNOME Wayland/X11 CLI tool to mirror or unmirror displays (gmm).
 
 Usage:
   gmm list monitor                             # List connected displays and layout
+  gmm list resolution <monitor>                # List all supported resolutions of <monitor> (aliases: list resolutions/res)
   gmm <source> <target1> [target2 ... targetN] # Mirror one or more targets onto source
   gmm unmirror <monitor>                       # Make <monitor> an independent extended display
   gmm unmirror all                             # Separate all mirrored monitors
   gmm --unmirror <monitor>
   gmm --unmirror all
+  gmm set-resolution <monitor> <resolution>[@rate] # Set resolution and optionally refresh rate (e.g. 1920x1080 or 1920x1080@144)
+  gmm set-res <monitor> <resolution>[@rate]
+  gmm resolution <monitor> <resolution>[@rate]
+  gmm res <monitor> <resolution>[@rate]
+  gmm resilution <monitor> <resolution>[@rate]
 
 Examples:
   gmm HDMI-5 DP-4
   gmm HDMI-5 DP-3 DP-4
   gmm unmirror DP-4
   gmm unmirror all
+  gmm set-resolution DP-4 1280x720
+  gmm set-resolution DP-4 1920x1080@144
+
 """)
 
 def get_mode_width(mode_id):
@@ -304,17 +322,131 @@ def main():
         print_help()
         return
         
-    # 2. list monitor subcommand
+    # 2. list subcommand
     if len(args) >= 1 and args[0] == 'list':
         if len(args) >= 2 and args[1] == 'monitor':
             print_status(physical_map, logical_monitors)
             return
+        elif len(args) >= 3 and args[1] in ('resolution', 'res', 'resolutions'):
+            monitor_target = args[2]
+            if monitor_target not in physical_map:
+                print(f"Error: Monitor '{monitor_target}' not found.", file=sys.stderr)
+                sys.exit(1)
+                
+            modes = physical_map[monitor_target]['modes']
+            res_dict = {}
+            for mode in modes:
+                mode_id, w, h, rate, scale_mult, flags, mode_props = mode
+                res_key = (w, h)
+                if res_key not in res_dict:
+                    res_dict[res_key] = []
+                res_dict[res_key].append(rate)
+                
+            sorted_res = sorted(res_dict.keys(), key=lambda x: x[0] * x[1], reverse=True)
+            print(f"Supported resolutions for monitor '{monitor_target}':")
+            for w, h in sorted_res:
+                rates = sorted(list(set(res_dict[(w, h)])), reverse=True)
+                rates_str = ", ".join(f"{r:.1f}Hz" for r in rates)
+                print(f"  - {w:<4} x {h:<4} @ {rates_str}")
+            return
         else:
-            print("Error: Unknown subcommand. Did you mean 'gmm list monitor'?", file=sys.stderr)
+            print("Error: Unknown subcommand. Did you mean 'gmm list monitor' or 'gmm list resolution <monitor>'?", file=sys.stderr)
             sys.exit(1)
             
-    # 3. Unmirror action
-    if args[0] in ('--unmirror', '-u', 'unmirror'):
+    # 3. Set resolution subcommand
+    if len(args) >= 1 and args[0] in ('set-resolution', 'set-res', 'resolution', 'res', 'resilution'):
+        if len(args) < 3:
+            print("Error: Please specify the monitor and target resolution (e.g. 1920x1080).", file=sys.stderr)
+            sys.exit(1)
+        monitor_target = args[1]
+        resolution_target = args[2]
+        
+        if monitor_target not in physical_map:
+            print(f"Error: Monitor '{monitor_target}' not found.", file=sys.stderr)
+            sys.exit(1)
+            
+        target_rate = None
+        if '@' in resolution_target:
+            res_part, rate_part = resolution_target.split('@', 1)
+            rate_part = rate_part.lower().replace('hz', '').strip()
+            try:
+                target_rate = float(rate_part)
+            except ValueError:
+                print(f"Error: Invalid refresh rate format in '{resolution_target}'. Must be like @144 or @144.0Hz.", file=sys.stderr)
+                sys.exit(1)
+            resolution_target = res_part
+
+        try:
+            parts = resolution_target.split('x')
+            w = int(parts[0])
+            h = int(parts[1])
+        except Exception:
+            print(f"Error: Invalid resolution format '{resolution_target}'. Must be WxH (e.g. 1920x1080).", file=sys.stderr)
+            sys.exit(1)
+            
+        # Find if monitor is active
+        target_lm_idx = None
+        for i, lm in enumerate(logical_monitors):
+            monitors = lm[5]
+            if any(m[0] == monitor_target for m in monitors):
+                target_lm_idx = i
+                break
+                
+        if target_lm_idx is None:
+            print(f"Error: Monitor '{monitor_target}' is not currently active.", file=sys.stderr)
+            sys.exit(1)
+            
+        # The monitor is active in logical_monitors[target_lm_idx]
+        target_group = logical_monitors[target_lm_idx]
+        group_monitors = target_group[5]
+        
+        new_mode_ids = {}
+        for mon in group_monitors:
+            conn = mon[0]
+            mode_id = find_best_mode(physical_map[conn]['modes'], w, h, target_rate)
+            if not mode_id:
+                rate_str = f" @ {target_rate}Hz" if target_rate is not None else ""
+                print(f"Error: Resolution {w}x{h}{rate_str} is not supported by monitor '{conn}'.", file=sys.stderr)
+                sys.exit(1)
+            new_mode_ids[conn] = mode_id
+            
+        rate_str = f" @ {target_rate}Hz" if target_rate is not None else ""
+        print(f"Setting resolution of group containing '{monitor_target}' to {w}x{h}{rate_str}...")
+        
+        # Build new_logical_monitors
+        new_logical_monitors = []
+        for i, lm in enumerate(logical_monitors):
+            x, y, scale, transform, primary, monitors, lm_props = lm
+            
+            dbus_monitors_list = []
+            for mon in monitors:
+                conn = mon[0]
+                if i == target_lm_idx:
+                    mode_id = new_mode_ids[conn]
+                else:
+                    # Keep current mode_id
+                    mode_id = None
+                    if conn in physical_map:
+                        if physical_map[conn]['current']:
+                            mode_id = physical_map[conn]['current'][0]
+                        elif physical_map[conn]['preferred']:
+                            mode_id = physical_map[conn]['preferred'][0]
+                    if not mode_id:
+                        mode_id = mon[1]
+                dbus_monitors_list.append(
+                    dbus.Struct((dbus.String(conn), dbus.String(mode_id), dbus.Dictionary({}, signature='sv')), signature='(ssa{sv})')
+                )
+                
+            new_logical_monitors.append(
+                dbus.Struct((
+                    dbus.Int32(x), dbus.Int32(y), dbus.Double(scale),
+                    dbus.UInt32(transform), dbus.Boolean(primary),
+                    dbus.Array(dbus_monitors_list, signature='(ssa{sv})')
+                ), signature='(iiduba(ssa{sv}))')
+            )
+            
+    # 4. Unmirror action
+    elif args[0] in ('--unmirror', '-u', 'unmirror'):
         if len(args) < 2:
             print("Error: Please specify the monitor to unmirror or 'all'.", file=sys.stderr)
             sys.exit(1)
