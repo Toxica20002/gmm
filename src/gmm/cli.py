@@ -78,6 +78,178 @@ def find_common_resolution_multi(source_conn, target_conns, physical_map):
         
     return source_mode_id, target_mode_ids, best_res
 
+def adjust_layout(new_logical_monitors, layout_mode):
+    lms = []
+    for lm in new_logical_monitors:
+        x = int(lm[0])
+        y = int(lm[1])
+        scale = float(lm[2])
+        transform = int(lm[3])
+        primary = bool(lm[4])
+        monitors = lm[5]
+        
+        if monitors:
+            mode_id = str(monitors[0][1])
+            try:
+                parts = mode_id.split('x')
+                mode_w = int(parts[0])
+                mode_h = int(parts[1].split('@')[0])
+            except Exception:
+                mode_w = 1920
+                mode_h = 1080
+        else:
+            mode_w = 1920
+            mode_h = 1080
+            
+        if transform in (1, 3, 5, 7):
+            mode_w, mode_h = mode_h, mode_w
+            
+        if layout_mode == 1: # logical
+            w = int(round(mode_w / scale))
+            h = int(round(mode_h / scale))
+        else: # physical
+            w = mode_w
+            h = mode_h
+            
+        lms.append({
+            'x': x,
+            'y': y,
+            'scale': scale,
+            'transform': transform,
+            'primary': primary,
+            'monitors': monitors,
+            'w': w,
+            'h': h
+        })
+        
+    if lms:
+        min_x = min(lm['x'] for lm in lms)
+        min_y = min(lm['y'] for lm in lms)
+        for lm in lms:
+            lm['x'] -= min_x
+            lm['y'] -= min_y
+            
+    def are_adjacent(lm1, lm2):
+        if (lm1['x'] + lm1['w'] == lm2['x']) or (lm2['x'] + lm2['w'] == lm1['x']):
+            overlap_y = min(lm1['y'] + lm1['h'], lm2['y'] + lm2['h']) - max(lm1['y'], lm2['y'])
+            if overlap_y > 0:
+                return True
+        if (lm1['y'] + lm1['h'] == lm2['y']) or (lm2['y'] + lm2['h'] == lm1['y']):
+            overlap_x = min(lm1['x'] + lm1['w'], lm2['x'] + lm2['w']) - max(lm1['x'], lm2['x'])
+            if overlap_x > 0:
+                return True
+        return False
+
+    visited = set()
+    components = []
+    for i, lm in enumerate(lms):
+        if i not in visited:
+            comp = [i]
+            queue = [i]
+            visited.add(i)
+            while queue:
+                curr = queue.pop(0)
+                for neighbor_idx, neighbor in enumerate(lms):
+                    if neighbor_idx not in visited:
+                        if are_adjacent(lms[curr], neighbor):
+                            visited.add(neighbor_idx)
+                            comp.append(neighbor_idx)
+                            queue.append(neighbor_idx)
+            components.append(comp)
+
+    main_comp_idx = 0
+    for idx, comp in enumerate(components):
+        if any(lms[i]['primary'] for i in comp):
+            main_comp_idx = idx
+            break
+            
+    placed_indices = set(components[main_comp_idx])
+    remaining_comps = [components[i] for i in range(len(components)) if i != main_comp_idx]
+    
+    while remaining_comps:
+        best_comp_idx = None
+        best_shift_x = 0
+        best_shift_y = 0
+        min_gap = float('inf')
+        
+        for comp_idx, comp in enumerate(remaining_comps):
+            for i in comp:
+                m_rem = lms[i]
+                for j in placed_indices:
+                    m_placed = lms[j]
+                    
+                    overlap_y = min(m_rem['y'] + m_rem['h'], m_placed['y'] + m_placed['h']) - max(m_rem['y'], m_placed['y'])
+                    if overlap_y > 0:
+                        if m_rem['x'] >= m_placed['x'] + m_placed['w']:
+                            gap = m_rem['x'] - (m_placed['x'] + m_placed['w'])
+                            if gap < min_gap:
+                                min_gap = gap
+                                best_comp_idx = comp_idx
+                                best_shift_x = -gap
+                                best_shift_y = 0
+                        elif m_rem['x'] + m_rem['w'] <= m_placed['x']:
+                            gap = m_placed['x'] - (m_rem['x'] + m_rem['w'])
+                            if gap < min_gap:
+                                min_gap = gap
+                                best_comp_idx = comp_idx
+                                best_shift_x = gap
+                                best_shift_y = 0
+                                
+                    overlap_x = min(m_rem['x'] + m_rem['w'], m_placed['x'] + m_placed['w']) - max(m_rem['x'], m_placed['x'])
+                    if overlap_x > 0:
+                        if m_rem['y'] >= m_placed['y'] + m_placed['h']:
+                            gap = m_rem['y'] - (m_placed['y'] + m_placed['h'])
+                            if gap < min_gap:
+                                min_gap = gap
+                                best_comp_idx = comp_idx
+                                best_shift_x = 0
+                                best_shift_y = -gap
+                        elif m_rem['y'] + m_rem['h'] <= m_placed['y']:
+                            gap = m_placed['y'] - (m_rem['y'] + m_rem['h'])
+                            if gap < min_gap:
+                                min_gap = gap
+                                best_comp_idx = comp_idx
+                                best_shift_x = 0
+                                best_shift_y = gap
+                                
+        if best_comp_idx is not None and min_gap != float('inf'):
+            comp_to_shift = remaining_comps.pop(best_comp_idx)
+            for i in comp_to_shift:
+                lms[i]['x'] += best_shift_x
+                lms[i]['y'] += best_shift_y
+                placed_indices.add(i)
+        else:
+            rightmost_placed_x = max(lms[j]['x'] + lms[j]['w'] for j in placed_indices)
+            comp_to_shift = remaining_comps.pop(0)
+            leftmost_rem_x = min(lms[i]['x'] for i in comp_to_shift)
+            shift_x = rightmost_placed_x - leftmost_rem_x
+            for i in comp_to_shift:
+                lms[i]['x'] += shift_x
+                lms[i]['y'] = 0
+                placed_indices.add(i)
+
+    if lms:
+        min_x = min(lm['x'] for lm in lms)
+        min_y = min(lm['y'] for lm in lms)
+        for lm in lms:
+            lm['x'] -= min_x
+            lm['y'] -= min_y
+            
+    result = []
+    for lm in lms:
+        monitors_list = [
+            dbus.Struct((dbus.String(m[0]), dbus.String(m[1]), dbus.Dictionary({}, signature='sv')), signature='(ssa{sv})')
+            for m in lm['monitors']
+        ]
+        result.append(
+            dbus.Struct((
+                dbus.Int32(lm['x']), dbus.Int32(lm['y']), dbus.Double(lm['scale']),
+                dbus.UInt32(lm['transform']), dbus.Boolean(lm['primary']),
+                dbus.Array(monitors_list, signature='(ssa{sv})')
+            ), signature='(iiduba(ssa{sv}))')
+        )
+    return result
+
 def print_status(physical_map, logical_monitors):
     print("=== Connected Physical Monitors ===")
     for conn, info in physical_map.items():
@@ -122,6 +294,7 @@ def main():
     interface = get_dbus_interface()
     serial, physical_monitors, logical_monitors, properties = interface.GetCurrentState()
     physical_map = build_physical_map(physical_monitors)
+    layout_mode = int(properties.get('layout-mode', 1))
     
     args = sys.argv[1:]
     
@@ -434,6 +607,7 @@ def main():
         sys.exit(1)
             
     # Apply the configuration (persistent method = 2)
+    new_logical_monitors = adjust_layout(new_logical_monitors, layout_mode)
     try:
         interface.ApplyMonitorsConfig(
             dbus.UInt32(serial),
