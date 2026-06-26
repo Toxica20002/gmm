@@ -30,7 +30,6 @@ Usage:
   gmm set-res <monitor> <resolution>[@rate]
   gmm resolution <monitor> <resolution>[@rate]
   gmm res <monitor> <resolution>[@rate]
-  gmm resilution <monitor> <resolution>[@rate]
 
 Examples:
   gmm HDMI-5 DP-4

@@ -35,7 +35,7 @@ def _dispatch(args, physical_map, logical_monitors):
         handle_list_command(args, physical_map, logical_monitors)
         return None
 
-    if args[0] in ('set-resolution', 'set-res', 'resolution', 'res', 'resilution'):
+    if args[0] in ('set-resolution', 'set-res', 'resolution', 'res'):
         if len(args) < 3:
             print("Error: Please specify the monitor and target resolution (e.g. 1920x1080).", file=sys.stderr)
             sys.exit(1)
