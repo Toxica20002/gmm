@@ -149,7 +149,3 @@ src/gmm/
 ```
 
 ---
-
-## License
-
-MIT — see [LICENSE](LICENSE).
